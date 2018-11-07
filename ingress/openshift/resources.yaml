@@ -1,0 +1,209 @@
+#########################
+##      CONFIGMAP      ##
+#########################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingress
+data:
+  envoy_config.yaml: |
+    static_resources:
+      listeners:
+      - address:
+          socket_address:
+            address: 0.0.0.0
+            port_value: 10000
+        filter_chains:
+        - filters:
+          - name: envoy.http_connection_manager
+            config:
+              tracing:
+                operation_name: ingress
+              codec_type: auto
+              stat_prefix: ingress_http
+              route_config:
+                name: ingress_route
+                virtual_hosts:
+                - name: service
+                  domains:
+                  - "*"
+                  routes:
+                  - match:
+                      prefix: "/pet/"
+                    route:
+                      cluster: pet
+                      prefix_rewrite: "/"
+                  - match:
+                      prefix: "/petstore/"
+                    route:
+                      cluster: petstore
+                      prefix_rewrite: "/"
+              http_filters:
+              - name: envoy.router
+                config: {}
+      clusters:
+      - name: sds
+        connect_timeout: 0.50s
+        type: strict_dns
+        lb_policy: round_robin
+        hosts:
+        - socket_address:
+            address: sds
+            port_value: 80
+      - name: pet
+        connect_timeout: 0.50s
+        type: eds
+        lb_policy: round_robin
+        eds_cluster_config:
+          eds_config:
+            api_config_source:
+              api_type: REST_LEGACY
+              cluster_names: sds
+              refresh_delay: 60s
+      - name: petstore
+        connect_timeout: 0.50s
+        type: eds
+        lb_policy: round_robin
+        outlier_detection:
+          consecutive_5xx: 3
+          interval: 10s
+          base_ejection_time: 10s
+          max_ejection_percent: 100
+        common_lb_config:
+          healthy_panic_threshold:
+            value: 0.0
+        eds_cluster_config:
+          eds_config:
+            api_config_source:
+              api_type: REST_LEGACY
+              cluster_names: sds
+              refresh_delay: 60s
+      - name: zipkin
+        connect_timeout: 1s
+        type: strict_dns
+        lb_policy: round_robin
+        hosts:
+        - socket_address:
+            address: zipkin
+            port_value: 80
+    tracing:
+      http:
+        name: envoy.zipkin
+        config:
+          collector_cluster: zipkin
+          collector_endpoint: "/api/v1/spans"
+    admin:
+      access_log_path: "/dev/null"
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8081
+
+---
+
+#########################
+##  DEPLOYMENT CONFIG  ##
+#########################
+apiVersion: v1
+kind: DeploymentConfig
+metadata:
+  labels:
+    app: ingress
+  name: ingress
+spec:
+  replicas: 1
+  selector:
+    app: ingress
+  strategy:
+    activeDeadlineSeconds: 21600
+    resources: {}
+    rollingParams:
+      intervalSeconds: 1
+      maxSurge: 25%
+      maxUnavailable: 25%
+      timeoutSeconds: 600
+      updatePeriodSeconds: 1
+    type: Rolling
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: ingress
+    spec:
+      containers:
+      - image: docker.io/jarodriguezparadigma/envoy:1.0
+        imagePullPolicy: Always
+        name: envoy
+        ports:
+        - containerPort: 10000
+          protocol: TCP
+        env:
+        - name: ENVOY_CONFIG_PATH
+          value: /temp/config/envoy.yaml
+        - name: ENVOY_STARTUP_PARAMS
+          value: --service-cluster ingress --service-node ingress
+        resources: {}
+        stdin: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        tty: true
+        volumeMounts:
+        - mountPath: /temp/config
+          name: config
+      volumes:
+      - configMap:
+          items:
+          - key: envoy_config.yaml
+            path: envoy.yaml
+          name: ingress
+        name: config
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+  test: false
+  triggers:
+  - type: ConfigChange
+
+---
+
+#########################
+##       SERVICE       ##
+#########################
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: ingress
+  name: ingress
+spec:
+  externalTrafficPolicy: Cluster
+  ports:
+  - name: 80-10000
+    port: 80
+    protocol: TCP
+    targetPort: 10000
+  selector:
+    app: ingress
+  sessionAffinity: None
+  type: LoadBalancer
+
+---
+
+#########################
+##        ROUTE        ##
+#########################
+apiVersion: v1
+kind: Route
+metadata:
+  labels:
+    app: ingress
+  name: ingress
+spec:
+  port:
+    targetPort: 80-10000
+  to:
+    kind: Service
+    name: ingress
+  wildcardPolicy: None
