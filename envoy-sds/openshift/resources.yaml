@@ -10,7 +10,7 @@ data:
     kubernetes:
       namespace: envoy
       api:
-        host: https://192.168.42.69:8443
+        host: https://kubernetes.default.svc.cluster.local
       token:
         path: /var/run/secrets/kubernetes.io/serviceaccount/token
     envoy:
